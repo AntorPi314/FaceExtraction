@@ -2,24 +2,54 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!--
+        FIX: foregroundServiceType="camera" শুধু API 29+ (Android 10+) এ কাজ করে।
+        Android 8.0 Oreo (API 26) তে এটা crash করে।
+        তাই FOREGROUND_SERVICE_CAMERA permission সরিয়ে দেওয়া হয়েছে
+        এবং service এ foregroundServiceType attribute রাখা হয়নি।
+    -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@drawable/face_extraction_icon_filled"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
+        android:roundIcon="@drawable/face_extraction_icon_filled"
         android:supportsRtl="true"
         android:theme="@style/Theme.FaceExtraction">
+
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            FIX: android:foregroundServiceType="camera" removed — API 29+ only।
+            Oreo (API 26) তে এই attribute থাকলে SecurityException হয়।
+        -->
+        <service
+            android:name=".service.FaceCaptureService"
+            android:enabled="true"
+            android:exported="false" />
+
     </application>
 
 </manifest>
