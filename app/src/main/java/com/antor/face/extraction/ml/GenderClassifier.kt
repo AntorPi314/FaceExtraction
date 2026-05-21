@@ -2,6 +2,7 @@ package com.antor.face.extraction.ml
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
 import com.antor.face.extraction.utils.Gender
 import org.tensorflow.lite.Interpreter
 import java.io.FileInputStream
@@ -10,56 +11,62 @@ import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 
 /**
- * TFLite Gender Classifier
+ * TFLite Gender Classifier — shubham0204/Age-Gender_Estimation_TF-Android
  *
- * দুটো model support করে:
+ * Model architecture (confirmed by binary inspection):
+ *   Input:  [1, 128, 128, 3]  — float32, normalized 0.0–1.0
+ *   Layers: Conv2D × 5 + BatchNorm + LeakyReLU + MaxPool → Flatten → Dense × 4 + LeakyReLU
+ *   Output: [1, 2]  — raw LeakyReLU activations (NOT softmax probabilities!)
+ *           index 0 = male score   (UTKFace label: 0 = male)
+ *           index 1 = female score (UTKFace label: 1 = female)
  *
- * Option A (Recommended - shubham0204):
- *   File name: gender_model.tflite
- *   Download: https://github.com/shubham0204/Age-Gender_Estimation_TF-Android
- *   Google Drive: https://drive.google.com/drive/folders/13478oTfOHD9Fkf53FtLXQEXO_IlgIPP5
- *   File: model_gender_q.tflite → rename to gender_model.tflite
- *   Input: 128x128 RGB | Output: [female_prob, male_prob]
+ * ⚠️ IMPORTANT: Last activation is LeakyReLU, NOT Softmax.
+ *    So output values are NOT bounded to [0,1] and do NOT sum to 1.
+ *    We must use argmax (which index is larger) — NOT a probability threshold.
  *
- * Option B (farmaker47):
- *   File name: gender_model.tflite
- *   Download: https://drive.google.com/open?id=1IkfW_TKiXZqr2jNhFXt6ohgzQkd8-Dts
- *   Input size auto-detected from model
- *
- * Place the file at: app/src/main/assets/gender_model.tflite
+ * Place the model at: app/src/main/assets/gender_model.tflite
  */
 class GenderClassifier(private val context: Context) {
 
     private var interpreter: Interpreter? = null
-    private var inputSize = 128 // default, auto-detected from model
+    private var inputSize = 128
     private var isLoaded = false
 
     companion object {
+        private const val TAG = "GenderClassifier"
         private const val MODEL_FILE = "gender_model.tflite"
+
+        // UTKFace dataset: 0 = male, 1 = female
+        private const val IDX_MALE = 0
+        private const val IDX_FEMALE = 1
+
+        // Minimum score gap to avoid near-tie ambiguity (tunable)
+        // যদি male_score এবং female_score এর পার্থক্য এর চেয়ে কম হয় → UNKNOWN
+        // 0.0f = সবসময় decision নেবে (tie-break ও করবে)
+        // 0.05f = কমপক্ষে 0.05 gap না থাকলে UNKNOWN
+        private const val MIN_SCORE_GAP = 0.05f
     }
 
     fun load(): Boolean {
         return try {
-            val assetFileDescriptor = context.assets.openFd(MODEL_FILE)
-            val inputStream = FileInputStream(assetFileDescriptor.fileDescriptor)
-            val fileChannel = inputStream.channel
-            val startOffset = assetFileDescriptor.startOffset
-            val declaredLength = assetFileDescriptor.declaredLength
-            val mappedByteBuffer = fileChannel.map(
-                FileChannel.MapMode.READ_ONLY, startOffset, declaredLength
+            val afd = context.assets.openFd(MODEL_FILE)
+            val channel = FileInputStream(afd.fileDescriptor).channel
+            val buffer = channel.map(
+                FileChannel.MapMode.READ_ONLY,
+                afd.startOffset,
+                afd.declaredLength
             )
-            interpreter = Interpreter(mappedByteBuffer)
+            interpreter = Interpreter(buffer)
 
-            // Auto-detect input size from model
-            val inputShape = interpreter!!.getInputTensor(0).shape()
-            if (inputShape.size >= 3) {
-                inputSize = inputShape[1] // [1, H, W, 3] → H
-            }
+            // Auto-detect input size: shape = [1, H, W, 3]
+            val shape = interpreter!!.getInputTensor(0).shape()
+            if (shape.size >= 3) inputSize = shape[1]
 
+            Log.d(TAG, "Model loaded. Input: ${inputSize}×${inputSize} | Output: raw LeakyReLU (argmax)")
             isLoaded = true
             true
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Model load failed: ${e.message}")
             isLoaded = false
             false
         }
@@ -69,10 +76,10 @@ class GenderClassifier(private val context: Context) {
         if (!isLoaded || interpreter == null) return Gender.UNKNOWN
 
         return try {
-            // Resize to model input size
+            // 1. Resize
             val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
 
-            // Convert to ByteBuffer (normalized 0-1)
+            // 2. Normalize pixels to [0.0, 1.0] — float32
             val inputBuffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4)
             inputBuffer.order(ByteOrder.nativeOrder())
             inputBuffer.rewind()
@@ -81,27 +88,31 @@ class GenderClassifier(private val context: Context) {
             resized.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
 
             for (pixel in pixels) {
-                val r = ((pixel shr 16) and 0xFF) / 255.0f
-                val g = ((pixel shr 8) and 0xFF) / 255.0f
-                val b = (pixel and 0xFF) / 255.0f
-                inputBuffer.putFloat(r)
-                inputBuffer.putFloat(g)
-                inputBuffer.putFloat(b)
+                inputBuffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f) // R
+                inputBuffer.putFloat(((pixel shr 8)  and 0xFF) / 255.0f) // G
+                inputBuffer.putFloat(( pixel          and 0xFF) / 255.0f) // B
             }
 
-            // Output: [female_prob, male_prob]
+            // 3. Run inference
+            // Output is raw LeakyReLU activation — NOT softmax probabilities
             val output = Array(1) { FloatArray(2) }
             interpreter?.run(inputBuffer, output)
 
-            val femaleProb = output[0][0]
-            val maleProb = output[0][1]
+            val maleScore   = output[0][IDX_MALE]
+            val femaleScore = output[0][IDX_FEMALE]
+            val gap = Math.abs(maleScore - femaleScore)
 
+            // Debug log — result ঠিক হলে এই line remove করুন
+            Log.d(TAG, "male_score=${"%.4f".format(maleScore)}  female_score=${"%.4f".format(femaleScore)}  gap=${"%.4f".format(gap)}")
+
+            // 4. Argmax + gap check
             when {
-                maleProb > femaleProb -> Gender.MALE
-                else -> Gender.FEMALE
+                gap < MIN_SCORE_GAP          -> Gender.UNKNOWN  // too close to call
+                maleScore > femaleScore      -> Gender.MALE
+                else                         -> Gender.FEMALE
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Classify error: ${e.message}")
             Gender.UNKNOWN
         }
     }

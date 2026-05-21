@@ -121,7 +121,6 @@ class FaceCaptureService : LifecycleService() {
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                 .build()
 
-            // FIX: ImageAnalysis outputs YUV_420_888 — use proper YUV→Bitmap conversion
             imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
@@ -201,7 +200,6 @@ class FaceCaptureService : LifecycleService() {
         val capture = imageCapture ?: return
         log("Capturing image...")
 
-        // FIX: Use non-deprecated resume pattern with suspendCancellableCoroutine
         suspendCancellableCoroutine { continuation ->
             capture.takePicture(
                 cameraExecutor,
@@ -209,7 +207,6 @@ class FaceCaptureService : LifecycleService() {
                     override fun onCaptureSuccess(imageProxy: ImageProxy) {
                         serviceScope.launch(Dispatchers.IO) {
                             try {
-                                // ImageCapture always gives JPEG via plane[0]
                                 val bitmap = jpegImageProxyToBitmap(imageProxy)
                                 imageProxy.close()
                                 if (bitmap != null) {
@@ -248,35 +245,42 @@ class FaceCaptureService : LifecycleService() {
 
         log("Found ${faces.size} face(s), classifying...")
 
-        faces.firstOrNull()?.let { broadcastFrame(EXTRA_CAPTURED_FACE, it.bitmap) }
+        // FIX: full original image দেখাবে — cropped face না
+        broadcastFrame(EXTRA_CAPTURED_FACE, bitmap)
 
         FileManager.clearAll(this)
 
         var maleCount = 0
         var femaleCount = 0
+        var unknownCount = 0
 
         for (face in faces) {
-            val gender = genderClassifier.classify(face.bitmap)
-            when (gender) {
-                Gender.MALE -> { FileManager.saveFace(this, face.bitmap, Gender.MALE); maleCount++ }
-                Gender.FEMALE -> { FileManager.saveFace(this, face.bitmap, Gender.FEMALE); femaleCount++ }
-                Gender.UNKNOWN -> { FileManager.saveFace(this, face.bitmap, Gender.MALE); maleCount++ }
+            when (genderClassifier.classify(face.bitmap)) {
+                Gender.MALE -> {
+                    FileManager.saveFace(this, face.bitmap, Gender.MALE)
+                    maleCount++
+                }
+                Gender.FEMALE -> {
+                    FileManager.saveFace(this, face.bitmap, Gender.FEMALE)
+                    femaleCount++
+                }
+                Gender.UNKNOWN -> {
+                    // FIX: confidence কম হলে skip করা হচ্ছে — আগে ভুল করে male এ save হতো
+                    unknownCount++
+                    Log.d(TAG, "Face skipped — confidence too low")
+                }
             }
         }
 
         val totalMale = FileManager.getMaleCount(this)
         val totalFemale = FileManager.getFemaleCount(this)
-        log("Saved: Male=$maleCount Female=$femaleCount | Total M=$totalMale F=$totalFemale")
+
+        val unknownInfo = if (unknownCount > 0) " | Skipped(low conf)=$unknownCount" else ""
+        log("Saved: Male=$maleCount Female=$femaleCount$unknownInfo | Total M=$totalMale F=$totalFemale")
         broadcastStatus(totalMale, totalFemale)
         updateNotification("Male: $totalMale  Female: $totalFemale")
     }
 
-    /**
-     * FIX: Proper YUV_420_888 → Bitmap conversion for ImageAnalysis frames.
-     * On Android 8 (Oreo), plane[0] of a YUV image is NOT JPEG — it's the Y plane.
-     * Reading it as BitmapFactory.decodeByteArray() produces null/garbage.
-     * We must use YuvImage to compress NV21 bytes to JPEG first.
-     */
     private fun yuv420ToBitmap(imageProxy: ImageProxy): Bitmap? {
         return try {
             val yPlane = imageProxy.planes[0]
@@ -291,32 +295,23 @@ class FaceCaptureService : LifecycleService() {
             val uSize = uBuffer.remaining()
             val vSize = vBuffer.remaining()
 
-            // Build NV21 byte array: Y plane + interleaved V/U
             val nv21 = ByteArray(ySize + uSize + vSize)
             yBuffer.get(nv21, 0, ySize)
-            // NV21 expects V then U (interleaved)
             vBuffer.get(nv21, ySize, vSize)
             uBuffer.get(nv21, ySize + vSize, uSize)
 
             val yuvImage = YuvImage(
-                nv21,
-                ImageFormat.NV21,
-                imageProxy.width,
-                imageProxy.height,
-                null
+                nv21, ImageFormat.NV21,
+                imageProxy.width, imageProxy.height, null
             )
 
             val out = ByteArrayOutputStream()
             yuvImage.compressToJpeg(
-                Rect(0, 0, imageProxy.width, imageProxy.height),
-                70,
-                out
+                Rect(0, 0, imageProxy.width, imageProxy.height), 70, out
             )
             val jpegBytes = out.toByteArray()
-            val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
-                ?: return null
+            val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size) ?: return null
 
-            // Rotate to correct orientation
             val matrix = Matrix()
             matrix.postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
             Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
@@ -326,9 +321,6 @@ class FaceCaptureService : LifecycleService() {
         }
     }
 
-    /**
-     * For ImageCapture callbacks — plane[0] IS JPEG bytes, safe to decode directly.
-     */
     private fun jpegImageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
         return try {
             val buffer = imageProxy.planes[0].buffer
@@ -346,7 +338,9 @@ class FaceCaptureService : LifecycleService() {
 
     private fun broadcastFrame(extraKey: String, bitmap: Bitmap) {
         try {
-            val maxDim = if (extraKey == EXTRA_LIVE_FRAME) 320 else 480
+            // Live frame: ছোট রাখো (15fps broadcast করতে হয়)
+            // Captured frame: full resolution রাখো — এটা শুধু একবার আসে
+            val maxDim = if (extraKey == EXTRA_LIVE_FRAME) 320 else 1080
             val scaled = if (bitmap.width > maxDim || bitmap.height > maxDim) {
                 val scale = maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)
                 Bitmap.createScaledBitmap(
@@ -357,7 +351,7 @@ class FaceCaptureService : LifecycleService() {
                 )
             } else bitmap
 
-            val quality = if (extraKey == EXTRA_LIVE_FRAME) 55 else 70
+            val quality = if (extraKey == EXTRA_LIVE_FRAME) 55 else 95
 
             val baos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
@@ -406,7 +400,7 @@ class FaceCaptureService : LifecycleService() {
         if (::faceProcessor.isInitialized) faceProcessor.close()
         cameraExecutor.shutdown()
         serviceScope.cancel()
-        stopForeground(true)  // FIX: STOP_FOREGROUND_REMOVE is API 33+, use boolean overload
+        stopForeground(true)
         stopSelf()
     }
 
@@ -422,7 +416,6 @@ class FaceCaptureService : LifecycleService() {
     }
 
     private fun buildNotification(status: String): Notification {
-        // FIX: PendingIntent.FLAG_IMMUTABLE requires API 23+, which we meet (minSdk=26). OK.
         val stopPi = PendingIntent.getService(
             this, 0,
             Intent(this, FaceCaptureService::class.java).apply { action = ACTION_STOP },
