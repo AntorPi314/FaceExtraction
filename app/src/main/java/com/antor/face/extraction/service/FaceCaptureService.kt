@@ -40,11 +40,18 @@ class FaceCaptureService : LifecycleService() {
 
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
+        /** Start server only (no periodic capture) — used for gallery-pick mode */
+        const val ACTION_START_SERVER_ONLY = "ACTION_START_SERVER_ONLY"
+        /** Process a single bitmap passed via broadcast from gallery pick */
+        const val ACTION_PROCESS_GALLERY = "ACTION_PROCESS_GALLERY"
+        /** Immediately capture a frame and reset the periodic timer from scratch */
+        const val ACTION_MANUAL_CAPTURE = "ACTION_MANUAL_CAPTURE"
 
         const val BROADCAST_STATUS = "com.antor.face.extraction.STATUS"
         const val EXTRA_LOG = "extra_log"
         const val EXTRA_MALE_COUNT = "extra_male_count"
         const val EXTRA_FEMALE_COUNT = "extra_female_count"
+        const val EXTRA_ALL_COUNT = "extra_all_count"
 
         const val BROADCAST_FRAME = "com.antor.face.extraction.FRAME"
         const val EXTRA_LIVE_FRAME = "extra_live_frame"
@@ -53,7 +60,12 @@ class FaceCaptureService : LifecycleService() {
         const val BROADCAST_COUNTDOWN = "com.antor.face.extraction.COUNTDOWN"
         const val EXTRA_COUNTDOWN_SECONDS = "extra_countdown_seconds"
 
+        /** Extra used to pass a JPEG byte array for gallery-pick processing */
+        const val EXTRA_GALLERY_JPEG = "extra_gallery_jpeg"
+
         var isRunning = false
+        /** True when service is running in server-only (no camera) mode */
+        var isServerOnly = false
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -85,19 +97,52 @@ class FaceCaptureService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
-            ACTION_STOP -> { stopCapture(); return START_NOT_STICKY }
+            ACTION_STOP -> {
+                stopCapture()
+                return START_NOT_STICKY
+            }
+            ACTION_START_SERVER_ONLY -> {
+                startServerOnly()
+            }
+            ACTION_PROCESS_GALLERY -> {
+                val jpeg = intent.getByteArrayExtra(EXTRA_GALLERY_JPEG)
+                if (jpeg != null) {
+                    val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+                    if (bitmap != null) {
+                        serviceScope.launch(Dispatchers.IO) { processImage(bitmap) }
+                    }
+                }
+            }
+            ACTION_MANUAL_CAPTURE -> {
+                if (isRunning && !isServerOnly) triggerManualCapture()
+            }
             else -> startCapture()
         }
         return START_STICKY
     }
 
+    // ── Full mode (camera + periodic capture) ────────────────────────────────
+
     private fun startCapture() {
         isRunning = true
+        isServerOnly = false
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
         startWebServer()
         setupCamera()
         startPeriodicCapture()
     }
+
+    // ── Server-only mode (no camera, no periodic capture) ────────────────────
+
+    private fun startServerOnly() {
+        isRunning = true
+        isServerOnly = true
+        startForeground(NOTIFICATION_ID, buildNotification("Server only — pick an image"))
+        startWebServer()
+        log("Server started (gallery mode)")
+    }
+
+    // ── Web server ────────────────────────────────────────────────────────────
 
     private fun startWebServer() {
         val port = AppSettings.getServerPort(this)
@@ -109,6 +154,8 @@ class FaceCaptureService : LifecycleService() {
             log("Web server failed: ${e.message}")
         }
     }
+
+    // ── Camera setup ──────────────────────────────────────────────────────────
 
     private fun setupCamera() {
         val useFront = AppSettings.getUseFrontCamera(this)
@@ -189,6 +236,48 @@ class FaceCaptureService : LifecycleService() {
         }
     }
 
+    /**
+     * Tap on CAMERA panel — capture immediately, then restart the interval timer from 0.
+     * Cancels any in-progress countdown and the pending periodic capture.
+     */
+    private fun triggerManualCapture() {
+        val intervalSec = AppSettings.getCaptureInterval(this)
+
+        // Cancel current timer cycle
+        captureJob?.cancel()
+        countdownJob?.cancel()
+
+        // Launch: capture now, then restart periodic loop
+        captureJob = serviceScope.launch {
+            captureAndProcess()
+            // Restart countdown + periodic loop fresh
+            countdownJob = launch {
+                var remaining = intervalSec
+                while (isActive) {
+                    broadcastCountdown(remaining)
+                    delay(1000L)
+                    remaining--
+                    if (remaining < 0) remaining = intervalSec
+                }
+            }
+            val intervalMs = intervalSec * 1000L
+            while (isActive) {
+                delay(intervalMs)
+                captureAndProcess()
+                countdownJob?.cancel()
+                countdownJob = launch {
+                    var remaining = intervalSec
+                    while (isActive) {
+                        broadcastCountdown(remaining)
+                        delay(1000L)
+                        remaining--
+                        if (remaining < 0) remaining = intervalSec
+                    }
+                }
+            }
+        }
+    }
+
     private fun broadcastCountdown(seconds: Int) {
         val intent = Intent(BROADCAST_COUNTDOWN).apply {
             putExtra(EXTRA_COUNTDOWN_SECONDS, seconds)
@@ -236,6 +325,9 @@ class FaceCaptureService : LifecycleService() {
     }
 
     private suspend fun processImage(bitmap: Bitmap) {
+        // Always save last captured frame to file (for /captured.jpg endpoint)
+        FileManager.saveLastCaptured(this, bitmap)
+
         val faces = faceProcessor.detectAndCrop(bitmap)
 
         if (faces.isEmpty()) {
@@ -245,10 +337,11 @@ class FaceCaptureService : LifecycleService() {
 
         log("Found ${faces.size} face(s), classifying...")
 
-        // FIX: full original image দেখাবে — cropped face না
+        // Broadcast full original image for UI preview
         broadcastFrame(EXTRA_CAPTURED_FACE, bitmap)
 
-        FileManager.clearAll(this)
+        // Clear only current session (male/female) — all/ stays cumulative
+        FileManager.clearCurrentSession(this)
 
         var maleCount = 0
         var femaleCount = 0
@@ -265,20 +358,20 @@ class FaceCaptureService : LifecycleService() {
                     femaleCount++
                 }
                 Gender.UNKNOWN -> {
-                    // FIX: confidence কম হলে skip করা হচ্ছে — আগে ভুল করে male এ save হতো
                     unknownCount++
                     Log.d(TAG, "Face skipped — confidence too low")
                 }
             }
         }
 
-        val totalMale = FileManager.getMaleCount(this)
+        val totalMale   = FileManager.getMaleCount(this)
         val totalFemale = FileManager.getFemaleCount(this)
+        val totalAll    = FileManager.getAllCount(this)
 
         val unknownInfo = if (unknownCount > 0) " | Skipped(low conf)=$unknownCount" else ""
-        log("Saved: Male=$maleCount Female=$femaleCount$unknownInfo | Total M=$totalMale F=$totalFemale")
-        broadcastStatus(totalMale, totalFemale)
-        updateNotification("Male: $totalMale  Female: $totalFemale")
+        log("Saved: Male=$maleCount Female=$femaleCount$unknownInfo | Total M=$totalMale F=$totalFemale All=$totalAll")
+        broadcastStatus(totalMale, totalFemale, totalAll)
+        updateNotification("Male: $totalMale  Female: $totalFemale  All: $totalAll")
     }
 
     private fun yuv420ToBitmap(imageProxy: ImageProxy): Bitmap? {
@@ -338,8 +431,6 @@ class FaceCaptureService : LifecycleService() {
 
     private fun broadcastFrame(extraKey: String, bitmap: Bitmap) {
         try {
-            // Live frame: ছোট রাখো (15fps broadcast করতে হয়)
-            // Captured frame: full resolution রাখো — এটা শুধু একবার আসে
             val maxDim = if (extraKey == EXTRA_LIVE_FRAME) 320 else 1080
             val scaled = if (bitmap.width > maxDim || bitmap.height > maxDim) {
                 val scale = maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)
@@ -377,21 +468,24 @@ class FaceCaptureService : LifecycleService() {
             putExtra(EXTRA_LOG, message)
             putExtra(EXTRA_MALE_COUNT, FileManager.getMaleCount(this@FaceCaptureService))
             putExtra(EXTRA_FEMALE_COUNT, FileManager.getFemaleCount(this@FaceCaptureService))
+            putExtra(EXTRA_ALL_COUNT, FileManager.getAllCount(this@FaceCaptureService))
         }
         sendBroadcast(intent)
     }
 
-    private fun broadcastStatus(male: Int, female: Int) {
+    private fun broadcastStatus(male: Int, female: Int, all: Int) {
         val intent = Intent(BROADCAST_STATUS).apply {
             putExtra(EXTRA_LOG, lastLog)
             putExtra(EXTRA_MALE_COUNT, male)
             putExtra(EXTRA_FEMALE_COUNT, female)
+            putExtra(EXTRA_ALL_COUNT, all)
         }
         sendBroadcast(intent)
     }
 
     private fun stopCapture() {
         isRunning = false
+        isServerOnly = false
         captureJob?.cancel()
         countdownJob?.cancel()
         webServer?.stop()

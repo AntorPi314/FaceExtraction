@@ -1,10 +1,14 @@
 package com.antor.face.extraction.ui
 
 import android.Manifest
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Build
+import android.widget.Toast
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,8 +23,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -36,9 +42,11 @@ import com.google.accompanist.permissions.rememberMultiplePermissionsState
 fun MainScreen(
     modifier: Modifier = Modifier,
     isRunning: Boolean,
+    isServerOnly: Boolean,
     logMessages: List<String>,
     maleCount: Int,
     femaleCount: Int,
+    allCount: Int,
     serverUrl: String,
     intervalSeconds: Int,
     useFrontCamera: Boolean,
@@ -49,6 +57,8 @@ fun MainScreen(
     onIntervalChange: (Int) -> Unit,
     onCameraToggle: (Boolean) -> Unit,
     onClearAll: () -> Unit,
+    onPickGalleryImage: () -> Unit,
+    onManualCapture: () -> Unit,
 ) {
     val permissions = buildList {
         add(Manifest.permission.CAMERA)
@@ -77,12 +87,20 @@ fun MainScreen(
                     .padding(top = 16.dp, bottom = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                AppHeader(isRunning = isRunning, countdownSeconds = countdownSeconds, intervalSeconds = intervalSeconds)
+                AppHeader(
+                    isRunning = isRunning,
+                    isServerOnly = isServerOnly,
+                    countdownSeconds = countdownSeconds,
+                    intervalSeconds = intervalSeconds
+                )
 
                 CameraPreviewRow(
                     isRunning = isRunning,
+                    isServerOnly = isServerOnly,
                     lastCapturedBitmap = lastCapturedBitmap,
                     liveBitmap = liveBitmap,
+                    onLongPressCaptured = onPickGalleryImage,
+                    onManualCapture = onManualCapture,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
@@ -91,6 +109,7 @@ fun MainScreen(
                 StatsAndServerRow(
                     maleCount = maleCount,
                     femaleCount = femaleCount,
+                    allCount = allCount,
                     serverUrl = serverUrl,
                     isRunning = isRunning
                 )
@@ -115,7 +134,12 @@ fun MainScreen(
 }
 
 @Composable
-fun AppHeader(isRunning: Boolean, countdownSeconds: Int, intervalSeconds: Int) {
+fun AppHeader(
+    isRunning: Boolean,
+    isServerOnly: Boolean,
+    countdownSeconds: Int,
+    intervalSeconds: Int
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -137,13 +161,20 @@ fun AppHeader(isRunning: Boolean, countdownSeconds: Int, intervalSeconds: Int) {
             )
         }
 
-        // Status badge with countdown
         Surface(
             shape = RoundedCornerShape(20.dp),
-            color = if (isRunning) Color(0xFF0D2B0D) else Color(0xFF1A1A22),
+            color = when {
+                isRunning && isServerOnly -> Color(0xFF1A1A0A)
+                isRunning                 -> Color(0xFF0D2B0D)
+                else                      -> Color(0xFF1A1A22)
+            },
             border = BorderStroke(
                 1.dp,
-                if (isRunning) Color(0xFF2A5A2A) else Color(0xFF2A2A35)
+                when {
+                    isRunning && isServerOnly -> Color(0xFF5A5A1A)
+                    isRunning                 -> Color(0xFF2A5A2A)
+                    else                      -> Color(0xFF2A2A35)
+                }
             )
         ) {
             Row(
@@ -151,7 +182,6 @@ fun AppHeader(isRunning: Boolean, countdownSeconds: Int, intervalSeconds: Int) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Pulsing dot
                 val infiniteTransition = rememberInfiniteTransition(label = "dot")
                 val dotAlpha by infiniteTransition.animateFloat(
                     initialValue = 1f,
@@ -162,35 +192,41 @@ fun AppHeader(isRunning: Boolean, countdownSeconds: Int, intervalSeconds: Int) {
                     ),
                     label = "dotAlpha"
                 )
+                val dotColor = when {
+                    isRunning && isServerOnly -> Color(0xFFE2C44A)
+                    isRunning                 -> Color(0xFF4CAF50)
+                    else                      -> Color(0xFF444455)
+                }
                 Box(
                     modifier = Modifier
                         .size(7.dp)
                         .clip(androidx.compose.foundation.shape.CircleShape)
-                        .background(
-                            (if (isRunning) Color(0xFF4CAF50) else Color(0xFF444455))
-                                .copy(alpha = if (isRunning) dotAlpha else 1f)
-                        )
+                        .background(dotColor.copy(alpha = if (isRunning) dotAlpha else 1f))
                 )
 
                 Text(
-                    text = if (isRunning) "LIVE" else "IDLE",
+                    text = when {
+                        isRunning && isServerOnly -> "SERVER"
+                        isRunning                 -> "LIVE"
+                        else                      -> "IDLE"
+                    },
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (isRunning) Color(0xFF4CAF50) else Color(0xFF555566),
+                    color = when {
+                        isRunning && isServerOnly -> Color(0xFFE2C44A)
+                        isRunning                 -> Color(0xFF4CAF50)
+                        else                      -> Color(0xFF555566)
+                    },
                     letterSpacing = 1.sp
                 )
 
-                // Countdown — only when running
-                if (isRunning && intervalSeconds > 0) {
-                    // Thin vertical divider
+                if (isRunning && !isServerOnly && intervalSeconds > 0) {
                     Box(
                         modifier = Modifier
                             .width(1.dp)
                             .height(12.dp)
                             .background(Color(0xFF2A5A2A))
                     )
-
-                    // Progress arc + number
                     CountdownBadge(
                         secondsRemaining = countdownSeconds,
                         totalSeconds = intervalSeconds
@@ -205,25 +241,22 @@ fun AppHeader(isRunning: Boolean, countdownSeconds: Int, intervalSeconds: Int) {
 fun CountdownBadge(secondsRemaining: Int, totalSeconds: Int) {
     val progress = if (totalSeconds > 0) secondsRemaining.toFloat() / totalSeconds else 0f
 
-    // Color shifts green → yellow → red as time runs out
     val badgeColor = when {
-        progress > 0.5f -> Color(0xFF4CAF50)
+        progress > 0.5f  -> Color(0xFF4CAF50)
         progress > 0.25f -> Color(0xFFFFB300)
-        else -> Color(0xFFE24A4A)
+        else             -> Color(0xFFE24A4A)
     }
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        // Circular progress ring
         androidx.compose.foundation.Canvas(modifier = Modifier.size(18.dp)) {
             val stroke = 2.5f
             val diameter = size.minDimension - stroke
             val topLeft = androidx.compose.ui.geometry.Offset(stroke / 2, stroke / 2)
             val arcSize = androidx.compose.ui.geometry.Size(diameter, diameter)
 
-            // Background track
             drawArc(
                 color = Color(0xFF2A3A2A),
                 startAngle = -90f,
@@ -233,7 +266,6 @@ fun CountdownBadge(secondsRemaining: Int, totalSeconds: Int) {
                 size = arcSize,
                 style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke)
             )
-            // Progress arc — sweeps from full → 0
             drawArc(
                 color = badgeColor,
                 startAngle = -90f,
@@ -259,8 +291,11 @@ fun CountdownBadge(secondsRemaining: Int, totalSeconds: Int) {
 @Composable
 fun CameraPreviewRow(
     isRunning: Boolean,
+    isServerOnly: Boolean,
     lastCapturedBitmap: Bitmap?,
     liveBitmap: Bitmap?,
+    onLongPressCaptured: () -> Unit,
+    onManualCapture: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -268,23 +303,50 @@ fun CameraPreviewRow(
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         PreviewPanel(
-            modifier = Modifier.weight(1f).fillMaxHeight(),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight(),
             label = "CAPTURED",
             labelColor = Color(0xFF4A90E2),
             bitmap = lastCapturedBitmap,
             emptyIcon = Icons.Default.Face,
-            emptyText = "Last Capture",
-            borderColor = Color(0xFF2A2A35)
+            emptyText = "Long-press to pick",
+            emptySubText = "from Gallery",
+            borderColor = Color(0xFF2A2A35),
+            imageContentScale = ContentScale.Fit,
+            onLongPress = onLongPressCaptured
         )
 
         PreviewPanel(
-            modifier = Modifier.weight(1f).fillMaxHeight(),
-            label = if (isRunning) "LIVE" else "CAMERA",
-            labelColor = if (isRunning) Color(0xFF4CAF50) else Color(0xFF555566),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight(),
+            label = when {
+                isRunning && !isServerOnly -> "LIVE"
+                isRunning && isServerOnly  -> "GALLERY"
+                else                       -> "CAMERA"
+            },
+            labelColor = when {
+                isRunning && !isServerOnly -> Color(0xFF4CAF50)
+                isRunning && isServerOnly  -> Color(0xFFE2C44A)
+                else                       -> Color(0xFF555566)
+            },
             bitmap = liveBitmap,
-            emptyIcon = Icons.Default.Videocam,
-            emptyText = if (isRunning) "Waiting..." else "Press Start",
-            borderColor = if (isRunning) Color(0xFF2A4A2A) else Color(0xFF2A2A35)
+            emptyIcon = if (isServerOnly) Icons.Default.PhotoLibrary else Icons.Default.Videocam,
+            emptyText = when {
+                isServerOnly -> "Gallery mode"
+                isRunning    -> "Tap to capture"
+                else         -> "Press Start"
+            },
+            emptySubText = if (isServerOnly) "Long-press Captured →" else null,
+            borderColor = when {
+                isRunning && !isServerOnly -> Color(0xFF2A4A2A)
+                isRunning && isServerOnly  -> Color(0xFF4A4A1A)
+                else                       -> Color(0xFF2A2A35)
+            },
+            showTapHint = isRunning && !isServerOnly,
+            onTap = if (isRunning && !isServerOnly) onManualCapture else null,
+            onLongPress = null
         )
     }
 }
@@ -297,7 +359,12 @@ fun PreviewPanel(
     bitmap: Bitmap?,
     emptyIcon: androidx.compose.ui.graphics.vector.ImageVector,
     emptyText: String,
-    borderColor: Color
+    emptySubText: String? = null,
+    borderColor: Color,
+    imageContentScale: ContentScale = ContentScale.Crop,
+    showTapHint: Boolean = false,
+    onTap: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null
 ) {
     Surface(
         modifier = modifier,
@@ -305,7 +372,20 @@ fun PreviewPanel(
         color = Color(0xFF111118),
         border = BorderStroke(1.dp, borderColor)
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (onTap != null || onLongPress != null) {
+                        Modifier.pointerInput(Unit) {
+                            detectTapGestures(
+                                onTap = { onTap?.invoke() },
+                                onLongPress = { onLongPress?.invoke() }
+                            )
+                        }
+                    } else Modifier
+                )
+        ) {
             if (bitmap != null) {
                 androidx.compose.foundation.Image(
                     bitmap = bitmap.asImageBitmap(),
@@ -313,7 +393,7 @@ fun PreviewPanel(
                     modifier = Modifier
                         .fillMaxSize()
                         .clip(RoundedCornerShape(16.dp)),
-                    contentScale = ContentScale.Crop
+                    contentScale = imageContentScale
                 )
             } else {
                 Column(
@@ -331,11 +411,23 @@ fun PreviewPanel(
                         text = emptyText,
                         fontSize = 11.sp,
                         color = Color(0xFF333344),
-                        letterSpacing = 0.5.sp
+                        letterSpacing = 0.5.sp,
+                        textAlign = TextAlign.Center
                     )
+                    if (emptySubText != null) {
+                        Text(
+                            text = emptySubText,
+                            fontSize = 9.sp,
+                            color = Color(0xFF2A2A38),
+                            letterSpacing = 0.3.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
                 }
             }
 
+            // Label badge
             Surface(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
@@ -352,30 +444,114 @@ fun PreviewPanel(
                     letterSpacing = 1.sp
                 )
             }
+
+            // Long-press indicator on CAPTURED panel
+            if (onLongPress != null) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color(0xCC0A0A0F)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.PhotoLibrary,
+                            contentDescription = null,
+                            tint = Color(0xFF4A90E2),
+                            modifier = Modifier.size(10.dp)
+                        )
+                        Text(
+                            text = "HOLD",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF4A90E2),
+                            letterSpacing = 0.8.sp
+                        )
+                    }
+                }
+            }
+
+            // Tap-to-capture indicator on LIVE panel
+            if (showTapHint) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color(0xCC0A0A0F)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.TouchApp,
+                            contentDescription = null,
+                            tint = Color(0xFF4CAF50),
+                            modifier = Modifier.size(10.dp)
+                        )
+                        Text(
+                            text = "TAP",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF4CAF50),
+                            letterSpacing = 0.8.sp
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun StatsAndServerRow(
     maleCount: Int,
     femaleCount: Int,
+    allCount: Int,
     serverUrl: String,
     isRunning: Boolean
 ) {
     val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
+
+    fun copyAndToast(text: String) {
+        clipboardManager.setText(AnnotatedString(text))
+        Toast.makeText(context, "Copied!", Toast.LENGTH_SHORT).show()
+    }
+
+    fun openInBrowser(url: String) {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    }
 
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { StatChip(label = "Male", value = maleCount.toString(), color = Color(0xFF4A90E2)) }
+        item { StatChip(label = "Male",   value = maleCount.toString(),   color = Color(0xFF4A90E2)) }
         item { StatChip(label = "Female", value = femaleCount.toString(), color = Color(0xFFE24A90)) }
-        item { StatChip(label = "Total", value = (maleCount + femaleCount).toString(), color = Color(0xFF9A6AE2)) }
+        item { StatChip(label = "Total",  value = (maleCount + femaleCount).toString(), color = Color(0xFF9A6AE2)) }
+        item { StatChip(label = "All",    value = allCount.toString(),     color = Color(0xFF4AE2A0)) }
+
         if (isRunning && serverUrl.isNotEmpty()) {
+
+            // Server root URL chip — tap = copy, long press = open browser
             item {
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = Color(0xFF111118),
                     border = BorderStroke(1.dp, Color(0xFF2A3A4A)),
-                    modifier = Modifier.clickable { clipboardManager.setText(AnnotatedString(serverUrl)) }
+                    modifier = Modifier.combinedClickable(
+                        onClick    = { copyAndToast(serverUrl) },
+                        onLongClick = { openInBrowser(serverUrl) }
+                    )
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -388,12 +564,18 @@ fun StatsAndServerRow(
                     }
                 }
             }
+
+            // people.json chip — tap = copy, long press = open browser
             item {
+                val peopleUrl = "$serverUrl/people.json"
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = Color(0xFF111118),
                     border = BorderStroke(1.dp, Color(0xFF2A3A2A)),
-                    modifier = Modifier.clickable { clipboardManager.setText(AnnotatedString("$serverUrl/people.json")) }
+                    modifier = Modifier.combinedClickable(
+                        onClick    = { copyAndToast(peopleUrl) },
+                        onLongClick = { openInBrowser(peopleUrl) }
+                    )
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -401,6 +583,29 @@ fun StatsAndServerRow(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text("people.json", fontSize = 11.sp, color = Color(0xFF4AE2A0), fontFamily = FontFamily.Monospace)
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color(0xFF333344), modifier = Modifier.size(11.dp))
+                    }
+                }
+            }
+
+            // all.json chip — tap = copy, long press = open browser
+            item {
+                val allUrl = "$serverUrl/all.json"
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFF111118),
+                    border = BorderStroke(1.dp, Color(0xFF3A2A3A)),
+                    modifier = Modifier.combinedClickable(
+                        onClick    = { copyAndToast(allUrl) },
+                        onLongClick = { openInBrowser(allUrl) }
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("all.json", fontSize = 11.sp, color = Color(0xFF9A6AE2), fontFamily = FontFamily.Monospace)
                         Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color(0xFF333344), modifier = Modifier.size(11.dp))
                     }
                 }
@@ -475,19 +680,26 @@ fun SettingsRow(
                         disabledTextColor = Color(0xFF666677),
                         cursorColor = Color(0xFF4A90E2)
                     ),
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp),
                     shape = RoundedCornerShape(8.dp)
                 )
             }
 
-            Box(modifier = Modifier.width(1.dp).height(50.dp).background(Color(0xFF2A2A35)))
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(50.dp)
+                    .background(Color(0xFF2A2A35))
+            )
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(text = "CAMERA", fontSize = 9.sp, color = Color(0xFF444455), letterSpacing = 1.sp)
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    CamToggleButton("Back", !useFrontCamera, !isRunning) { onCameraToggle(false) }
-                    CamToggleButton("Front", useFrontCamera, !isRunning) { onCameraToggle(true) }
+                    CamToggleButton("Back",  !useFrontCamera, !isRunning) { onCameraToggle(false) }
+                    CamToggleButton("Front",  useFrontCamera, !isRunning) { onCameraToggle(true) }
                 }
             }
         }
@@ -528,7 +740,9 @@ fun BottomRow(
     ) {
         Button(
             onClick = onStartStop,
-            modifier = Modifier.height(46.dp).width(110.dp),
+            modifier = Modifier
+                .height(46.dp)
+                .width(110.dp),
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = if (isRunning) Color(0xFF8B2020) else Color(0xFF1E4A8A)
@@ -540,7 +754,11 @@ fun BottomRow(
                 modifier = Modifier.size(18.dp)
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text(text = if (isRunning) "Stop" else "Start", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            Text(
+                text = if (isRunning) "Stop" else "Start",
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp
+            )
         }
 
         OutlinedButton(
@@ -554,7 +772,9 @@ fun BottomRow(
         }
 
         Surface(
-            modifier = Modifier.weight(1f).height(46.dp),
+            modifier = Modifier
+                .weight(1f)
+                .height(46.dp),
             shape = RoundedCornerShape(12.dp),
             color = Color(0xFF0D0D14),
             border = BorderStroke(1.dp, Color(0xFF1A1A25))
@@ -604,7 +824,9 @@ fun BottomRow(
 fun PermissionScreen(onRequest: () -> Unit) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Card(
-            modifier = Modifier.fillMaxWidth().padding(32.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(32.dp),
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A22)),
             border = BorderStroke(1.dp, Color(0xFF2A2A35))
@@ -613,9 +835,19 @@ fun PermissionScreen(onRequest: () -> Unit) {
                 modifier = Modifier.padding(32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Icon(Icons.Default.CameraAlt, contentDescription = null, tint = Color(0xFF4A90E2), modifier = Modifier.size(48.dp))
+                Icon(
+                    Icons.Default.CameraAlt,
+                    contentDescription = null,
+                    tint = Color(0xFF4A90E2),
+                    modifier = Modifier.size(48.dp)
+                )
                 Spacer(modifier = Modifier.height(16.dp))
-                Text("Permissions Required", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Text(
+                    "Permissions Required",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     "Camera access needed for face extraction",
