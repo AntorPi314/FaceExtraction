@@ -26,6 +26,7 @@ import com.antor.face.extraction.server.FaceWebServer
 import com.antor.face.extraction.utils.AppSettings
 import com.antor.face.extraction.utils.FileManager
 import com.antor.face.extraction.utils.Gender
+import com.antor.face.extraction.utils.ImageUtils
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
@@ -40,11 +41,8 @@ class FaceCaptureService : LifecycleService() {
 
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
-        /** Start server only (no periodic capture) — used for gallery-pick mode */
         const val ACTION_START_SERVER_ONLY = "ACTION_START_SERVER_ONLY"
-        /** Process a single bitmap passed via broadcast from gallery pick */
         const val ACTION_PROCESS_GALLERY = "ACTION_PROCESS_GALLERY"
-        /** Immediately capture a frame and reset the periodic timer from scratch */
         const val ACTION_MANUAL_CAPTURE = "ACTION_MANUAL_CAPTURE"
 
         const val BROADCAST_STATUS = "com.antor.face.extraction.STATUS"
@@ -60,11 +58,9 @@ class FaceCaptureService : LifecycleService() {
         const val BROADCAST_COUNTDOWN = "com.antor.face.extraction.COUNTDOWN"
         const val EXTRA_COUNTDOWN_SECONDS = "extra_countdown_seconds"
 
-        /** Extra used to pass a JPEG byte array for gallery-pick processing */
         const val EXTRA_GALLERY_JPEG = "extra_gallery_jpeg"
 
         var isRunning = false
-        /** True when service is running in server-only (no camera) mode */
         var isServerOnly = false
     }
 
@@ -121,8 +117,6 @@ class FaceCaptureService : LifecycleService() {
         return START_STICKY
     }
 
-    // ── Full mode (camera + periodic capture) ────────────────────────────────
-
     private fun startCapture() {
         isRunning = true
         isServerOnly = false
@@ -132,8 +126,6 @@ class FaceCaptureService : LifecycleService() {
         startPeriodicCapture()
     }
 
-    // ── Server-only mode (no camera, no periodic capture) ────────────────────
-
     private fun startServerOnly() {
         isRunning = true
         isServerOnly = true
@@ -141,8 +133,6 @@ class FaceCaptureService : LifecycleService() {
         startWebServer()
         log("Server started (gallery mode)")
     }
-
-    // ── Web server ────────────────────────────────────────────────────────────
 
     private fun startWebServer() {
         val port = AppSettings.getServerPort(this)
@@ -154,8 +144,6 @@ class FaceCaptureService : LifecycleService() {
             log("Web server failed: ${e.message}")
         }
     }
-
-    // ── Camera setup ──────────────────────────────────────────────────────────
 
     private fun setupCamera() {
         val useFront = AppSettings.getUseFrontCamera(this)
@@ -236,21 +224,14 @@ class FaceCaptureService : LifecycleService() {
         }
     }
 
-    /**
-     * Tap on CAMERA panel — capture immediately, then restart the interval timer from 0.
-     * Cancels any in-progress countdown and the pending periodic capture.
-     */
     private fun triggerManualCapture() {
         val intervalSec = AppSettings.getCaptureInterval(this)
 
-        // Cancel current timer cycle
         captureJob?.cancel()
         countdownJob?.cancel()
 
-        // Launch: capture now, then restart periodic loop
         captureJob = serviceScope.launch {
             captureAndProcess()
-            // Restart countdown + periodic loop fresh
             countdownJob = launch {
                 var remaining = intervalSec
                 while (isActive) {
@@ -325,7 +306,6 @@ class FaceCaptureService : LifecycleService() {
     }
 
     private suspend fun processImage(bitmap: Bitmap) {
-        // Always save last captured frame to file (for /captured.jpg endpoint)
         FileManager.saveLastCaptured(this, bitmap)
 
         val faces = faceProcessor.detectAndCrop(bitmap)
@@ -337,10 +317,8 @@ class FaceCaptureService : LifecycleService() {
 
         log("Found ${faces.size} face(s), classifying...")
 
-        // Broadcast full original image for UI preview
         broadcastFrame(EXTRA_CAPTURED_FACE, bitmap)
 
-        // Clear only current session (male/female) — all/ stays cumulative
         FileManager.clearCurrentSession(this)
 
         var maleCount = 0
@@ -374,6 +352,7 @@ class FaceCaptureService : LifecycleService() {
         updateNotification("Male: $totalMale  Female: $totalFemale  All: $totalAll")
     }
 
+    // ✅ Sensor + display rotation দিয়ে সবসময় upright bitmap
     private fun yuv420ToBitmap(imageProxy: ImageProxy): Bitmap? {
         return try {
             val yPlane = imageProxy.planes[0]
@@ -402,27 +381,28 @@ class FaceCaptureService : LifecycleService() {
             yuvImage.compressToJpeg(
                 Rect(0, 0, imageProxy.width, imageProxy.height), 70, out
             )
-            val jpegBytes = out.toByteArray()
-            val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size) ?: return null
+            val bitmap = BitmapFactory.decodeByteArray(out.toByteArray(), 0, out.size()) ?: return null
 
-            val matrix = Matrix()
-            matrix.postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
-            Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            val useFront = AppSettings.getUseFrontCamera(this)
+            val rotation = ImageUtils.getCorrectRotation(this, useFront)
+            ImageUtils.rotateBitmap(bitmap, rotation, flipHorizontal = useFront)
         } catch (e: Exception) {
             e.printStackTrace()
             null
         }
     }
 
+    // ✅ Sensor + display rotation দিয়ে সবসময় upright bitmap
     private fun jpegImageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
         return try {
             val buffer = imageProxy.planes[0].buffer
             val bytes = ByteArray(buffer.remaining())
             buffer.get(bytes)
             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-            val matrix = Matrix()
-            matrix.postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
-            Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+
+            val useFront = AppSettings.getUseFrontCamera(this)
+            val rotation = ImageUtils.getCorrectRotation(this, useFront)
+            ImageUtils.rotateBitmap(bitmap, rotation, flipHorizontal = useFront)
         } catch (e: Exception) {
             e.printStackTrace()
             null

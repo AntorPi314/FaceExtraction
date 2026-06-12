@@ -28,6 +28,7 @@ import com.antor.face.extraction.utils.FileManager
 import com.antor.face.extraction.utils.NetworkUtils
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import com.antor.face.extraction.utils.ImageUtils
 
 class MainActivity : ComponentActivity() {
 
@@ -170,22 +171,20 @@ class MainActivity : ComponentActivity() {
     // ── Gallery image picked ──────────────────────────────────────────────────
 
     private fun onGalleryImagePicked(uri: Uri) {
-        // Ensure service (server) is running — server-only mode
         if (!FaceCaptureService.isRunning) {
             startServiceServerOnly()
         }
 
-        // Decode URI → JPEG bytes → send to service for processing
         try {
             val stream: InputStream = contentResolver.openInputStream(uri) ?: return
-            val originalBitmap = BitmapFactory.decodeStream(stream) ?: return
+            var originalBitmap = BitmapFactory.decodeStream(stream) ?: return
             stream.close()
 
-            // Update captured preview immediately
+            originalBitmap = ImageUtils.fixExifRotation(this, uri, originalBitmap)
+
             _capturedBitmap.value = originalBitmap
             _logMessages.add(0, "Gallery image picked, processing...")
 
-            // Compress to JPEG bytes for IPC
             val baos = ByteArrayOutputStream()
             originalBitmap.compress(Bitmap.CompressFormat.JPEG, 92, baos)
             val jpegBytes = baos.toByteArray()
