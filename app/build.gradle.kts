@@ -12,8 +12,8 @@ android {
         applicationId = "com.antor.face.extraction"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "2.1"
+        versionCode = 23
+        versionName = "2.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -42,6 +42,12 @@ android {
 
     aaptOptions {
         noCompress += "tflite"
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 }
 
@@ -78,4 +84,7 @@ dependencies {
     implementation(libs.accompanist.permissions)
 
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+
+    implementation("androidx.lifecycle:lifecycle-process:2.8.7")
+
 }

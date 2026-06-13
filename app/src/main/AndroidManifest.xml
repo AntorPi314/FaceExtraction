@@ -4,13 +4,10 @@
 
     <!-- Permissions -->
     <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!--
-        FIX: foregroundServiceType="camera" শুধু API 29+ (Android 10+) এ কাজ করে।
-        Android 8.0 Oreo (API 26) তে এটা crash করে।
-        তাই FOREGROUND_SERVICE_CAMERA permission সরিয়ে দেওয়া হয়েছে
-        এবং service এ foregroundServiceType attribute রাখা হয়নি।
-    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"
+        />
+
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -48,7 +45,8 @@
         <service
             android:name=".service.FaceCaptureService"
             android:enabled="true"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="camera" />
 
     </application>
 

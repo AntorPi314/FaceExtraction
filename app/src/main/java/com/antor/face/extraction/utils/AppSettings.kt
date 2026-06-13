@@ -8,10 +8,12 @@ object AppSettings {
     private const val KEY_INTERVAL = "capture_interval_seconds"
     private const val KEY_USE_FRONT_CAMERA = "use_front_camera"
     private const val KEY_SERVER_PORT = "server_port"
+    private const val KEY_SELECTED_MODEL = "selected_model"
 
     const val DEFAULT_INTERVAL = 15
     const val DEFAULT_USE_FRONT_CAMERA = false
     const val DEFAULT_PORT = 8080
+    const val DEFAULT_MODEL = "default"
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -33,4 +35,10 @@ object AppSettings {
 
     fun setServerPort(context: Context, port: Int) =
         prefs(context).edit().putInt(KEY_SERVER_PORT, port).apply()
+
+    fun getSelectedModel(context: Context): String =
+        prefs(context).getString(KEY_SELECTED_MODEL, DEFAULT_MODEL) ?: DEFAULT_MODEL
+
+    fun setSelectedModel(context: Context, model: String) =
+        prefs(context).edit().putString(KEY_SELECTED_MODEL, model).apply()
 }

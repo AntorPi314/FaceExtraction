@@ -1,8 +1,9 @@
 package com.antor.face.extraction.server
 
-import android.content.Context
 import com.antor.face.extraction.utils.FileManager
+import com.antor.face.extraction.utils.NetworkUtils
 import fi.iki.elonen.NanoHTTPD
+import android.content.Context
 import java.io.File
 import java.io.FileInputStream
 import java.text.SimpleDateFormat
@@ -58,7 +59,18 @@ class FaceWebServer(
                 }
                 else -> return notFound()
             }
+
+            // ✅ Path traversal protection:
+            // canonical path check করে নিশ্চিত করি যে requested file
+            // আসলেই allowed directory এর ভেতরে আছে।
+            // এটা "../../../etc/passwd" style attack ঠেকায়।
             val file = File(dir, filename)
+            val canonicalFile = file.canonicalPath
+            val canonicalDir  = dir.canonicalPath
+            if (!canonicalFile.startsWith(canonicalDir + File.separator)) {
+                return forbidden()
+            }
+
             if (!file.exists()) return notFound()
             newChunkedResponse(Response.Status.OK, "image/jpeg", FileInputStream(file))
         } catch (e: Exception) {
@@ -149,19 +161,17 @@ class FaceWebServer(
         }
     }
 
+    // ✅ আর duplicate IP logic নেই — সরাসরি NetworkUtils ব্যবহার করছে
     private fun getBaseUrl(): String {
-        return try {
-            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-            val ip = wm.connectionInfo.ipAddress
-            if (ip != 0) {
-                val s = String.format("%d.%d.%d.%d", ip and 0xff, ip shr 8 and 0xff, ip shr 16 and 0xff, ip shr 24 and 0xff)
-                "http://$s:${this.listeningPort}"
-            } else "http://127.0.0.1:${this.listeningPort}"
-        } catch (e: Exception) { "http://127.0.0.1:${this.listeningPort}" }
+        val ip = NetworkUtils.getWifiIpAddress(context)
+        return "http://$ip:${this.listeningPort}"
     }
 
     private fun notFound() =
         newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_HTML, "<h1>Not Found</h1>")
+
+    private fun forbidden() =
+        newFixedLengthResponse(Response.Status.FORBIDDEN, MIME_HTML, "<h1>403 Forbidden</h1>")
 
     private fun buildIndexHtml(maleFiles: List<File>, femaleFiles: List<File>): String {
         val totalMale   = maleFiles.size
@@ -187,7 +197,7 @@ class FaceWebServer(
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',sans-serif;background:#0a0a0f;color:#fff;min-height:100vh}
-#err-bar{display:none;position:fixed;top:0;left:0;right:0;z-index:200;background:#1a0a0a;border-bottom:1px solid #6a1a1a;padding:.35rem 1rem;font-size:.72rem;color:#e24a4a;letter-spacing:.3px}
+#err-bar{display:none;position:fixed;bottom:0;left:0;right:0;z-index:200;background:#1a0a0a;border-top:1px solid #6a1a1a;padding:.35rem 1rem;font-size:.72rem;color:#e24a4a;letter-spacing:.3px}
 header{display:flex;align-items:center;justify-content:space-between;gap:.6rem;padding:.9rem 1.2rem;border-bottom:1px solid #1a1a25;position:sticky;top:0;background:#0a0a0f;z-index:10;flex-wrap:wrap}
 h1{font-size:1.15rem;letter-spacing:.5px;font-weight:800;white-space:nowrap;display:flex;align-items:center;gap:.4rem}
 .dot{width:7px;height:7px;border-radius:50%;background:#4caf50;display:inline-block;animation:pulse 2s infinite;flex-shrink:0}

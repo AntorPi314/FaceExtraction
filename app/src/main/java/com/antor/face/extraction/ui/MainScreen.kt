@@ -20,9 +20,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -53,12 +55,16 @@ fun MainScreen(
     lastCapturedBitmap: Bitmap?,
     liveBitmap: Bitmap?,
     countdownSeconds: Int,
+    selectedModel: String,
+    manualRotationDegrees: Int,
     onStartStop: () -> Unit,
     onIntervalChange: (Int) -> Unit,
     onCameraToggle: (Boolean) -> Unit,
+    onRotate: () -> Unit,
     onClearAll: () -> Unit,
     onPickGalleryImage: () -> Unit,
     onManualCapture: () -> Unit,
+    onModelChange: (String) -> Unit,
 ) {
     val permissions = buildList {
         add(Manifest.permission.CAMERA)
@@ -91,7 +97,9 @@ fun MainScreen(
                     isRunning = isRunning,
                     isServerOnly = isServerOnly,
                     countdownSeconds = countdownSeconds,
-                    intervalSeconds = intervalSeconds
+                    intervalSeconds = intervalSeconds,
+                    selectedModel = selectedModel,
+                    onModelChange = onModelChange
                 )
 
                 CameraPreviewRow(
@@ -99,8 +107,10 @@ fun MainScreen(
                     isServerOnly = isServerOnly,
                     lastCapturedBitmap = lastCapturedBitmap,
                     liveBitmap = liveBitmap,
+                    manualRotationDegrees = manualRotationDegrees,
                     onLongPressCaptured = onPickGalleryImage,
                     onManualCapture = onManualCapture,
+                    onRotate = onRotate,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
@@ -138,8 +148,12 @@ fun AppHeader(
     isRunning: Boolean,
     isServerOnly: Boolean,
     countdownSeconds: Int,
-    intervalSeconds: Int
+    intervalSeconds: Int,
+    selectedModel: String,
+    onModelChange: (String) -> Unit
 ) {
+    var showModelDialog by remember { mutableStateOf(false) }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -161,79 +175,145 @@ fun AppHeader(
             )
         }
 
-        Surface(
-            shape = RoundedCornerShape(20.dp),
-            color = when {
-                isRunning && isServerOnly -> Color(0xFF1A1A0A)
-                isRunning                 -> Color(0xFF0D2B0D)
-                else                      -> Color(0xFF1A1A22)
-            },
-            border = BorderStroke(
-                1.dp,
-                when {
-                    isRunning && isServerOnly -> Color(0xFF5A5A1A)
-                    isRunning                 -> Color(0xFF2A5A2A)
-                    else                      -> Color(0xFF2A2A35)
-                }
-            )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            IconButton(
+                onClick = { showModelDialog = true },
+                modifier = Modifier.size(36.dp)
             ) {
-                val infiniteTransition = rememberInfiniteTransition(label = "dot")
-                val dotAlpha by infiniteTransition.animateFloat(
-                    initialValue = 1f,
-                    targetValue = if (isRunning) 0.25f else 1f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(900, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "dotAlpha"
+                Icon(
+                    Icons.Default.Settings,
+                    contentDescription = "Model Settings",
+                    tint = Color(0xFF555566),
+                    modifier = Modifier.size(20.dp)
                 )
-                val dotColor = when {
-                    isRunning && isServerOnly -> Color(0xFFE2C44A)
-                    isRunning                 -> Color(0xFF4CAF50)
-                    else                      -> Color(0xFF444455)
-                }
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(androidx.compose.foundation.shape.CircleShape)
-                        .background(dotColor.copy(alpha = if (isRunning) dotAlpha else 1f))
-                )
+            }
 
-                Text(
-                    text = when {
-                        isRunning && isServerOnly -> "SERVER"
-                        isRunning                 -> "LIVE"
-                        else                      -> "IDLE"
-                    },
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = when {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = when {
+                    isRunning && isServerOnly -> Color(0xFF1A1A0A)
+                    isRunning                 -> Color(0xFF0D2B0D)
+                    else                      -> Color(0xFF1A1A22)
+                },
+                border = BorderStroke(
+                    1.dp,
+                    when {
+                        isRunning && isServerOnly -> Color(0xFF5A5A1A)
+                        isRunning                 -> Color(0xFF2A5A2A)
+                        else                      -> Color(0xFF2A2A35)
+                    }
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val infiniteTransition = rememberInfiniteTransition(label = "dot")
+                    val dotAlpha by infiniteTransition.animateFloat(
+                        initialValue = 1f,
+                        targetValue = if (isRunning) 0.25f else 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(900, easing = FastOutSlowInEasing),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "dotAlpha"
+                    )
+                    val dotColor = when {
                         isRunning && isServerOnly -> Color(0xFFE2C44A)
                         isRunning                 -> Color(0xFF4CAF50)
-                        else                      -> Color(0xFF555566)
-                    },
-                    letterSpacing = 1.sp
-                )
-
-                if (isRunning && !isServerOnly && intervalSeconds > 0) {
+                        else                      -> Color(0xFF444455)
+                    }
                     Box(
                         modifier = Modifier
-                            .width(1.dp)
-                            .height(12.dp)
-                            .background(Color(0xFF2A5A2A))
+                            .size(7.dp)
+                            .clip(androidx.compose.foundation.shape.CircleShape)
+                            .background(dotColor.copy(alpha = if (isRunning) dotAlpha else 1f))
                     )
-                    CountdownBadge(
-                        secondsRemaining = countdownSeconds,
-                        totalSeconds = intervalSeconds
+
+                    Text(
+                        text = when {
+                            isRunning && isServerOnly -> "SERVER"
+                            isRunning                 -> "LIVE"
+                            else                      -> "IDLE"
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = when {
+                            isRunning && isServerOnly -> Color(0xFFE2C44A)
+                            isRunning                 -> Color(0xFF4CAF50)
+                            else                      -> Color(0xFF555566)
+                        },
+                        letterSpacing = 1.sp
                     )
+
+                    if (isRunning && !isServerOnly && intervalSeconds > 0) {
+                        Box(
+                            modifier = Modifier
+                                .width(1.dp)
+                                .height(12.dp)
+                                .background(Color(0xFF2A5A2A))
+                        )
+                        CountdownBadge(
+                            secondsRemaining = countdownSeconds,
+                            totalSeconds = intervalSeconds
+                        )
+                    }
                 }
             }
         }
+    }
+
+    if (showModelDialog) {
+        AlertDialog(
+            onDismissRequest = { showModelDialog = false },
+            containerColor = Color(0xFF1A1A22),
+            title = {
+                Text("Select Model", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        "default" to "Default",
+                        "smuct" to "SMUCT",
+                        "utkface" to "UTKFace"
+                    ).forEach { (value, label) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onModelChange(value)
+                                    showModelDialog = false
+                                }
+                                .padding(vertical = 8.dp)
+                        ) {
+                            RadioButton(
+                                selected = selectedModel == value,
+                                onClick = {
+                                    onModelChange(value)
+                                    showModelDialog = false
+                                },
+                                colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF4A90E2))
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(label, color = Color.White, fontSize = 14.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showModelDialog = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2A35))
+                ) {
+                    Text("Close", color = Color.White)
+                }
+            }
+        )
     }
 }
 
@@ -294,8 +374,10 @@ fun CameraPreviewRow(
     isServerOnly: Boolean,
     lastCapturedBitmap: Bitmap?,
     liveBitmap: Bitmap?,
+    manualRotationDegrees: Int,
     onLongPressCaptured: () -> Unit,
     onManualCapture: () -> Unit,
+    onRotate: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -309,6 +391,7 @@ fun CameraPreviewRow(
             label = "CAPTURED",
             labelColor = Color(0xFF4A90E2),
             bitmap = lastCapturedBitmap,
+            bitmapRotationDegrees = 0f, // captured bitmap ইতিমধ্যে rotate হয়ে আসে
             emptyIcon = Icons.Default.Face,
             emptyText = "Long-press to pick",
             emptySubText = "from Gallery",
@@ -317,37 +400,234 @@ fun CameraPreviewRow(
             onLongPress = onLongPressCaptured
         )
 
-        PreviewPanel(
+        // ✅ Live camera panel — rotate icon এবং yellow TOP indicator সহ
+        LiveCameraPanel(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight(),
-            label = when {
-                isRunning && !isServerOnly -> "LIVE"
-                isRunning && isServerOnly  -> "GALLERY"
-                else                       -> "CAMERA"
-            },
-            labelColor = when {
-                isRunning && !isServerOnly -> Color(0xFF4CAF50)
-                isRunning && isServerOnly  -> Color(0xFFE2C44A)
-                else                       -> Color(0xFF555566)
-            },
-            bitmap = liveBitmap,
-            emptyIcon = if (isServerOnly) Icons.Default.PhotoLibrary else Icons.Default.Videocam,
-            emptyText = when {
-                isServerOnly -> "Gallery mode"
-                isRunning    -> "Tap to capture"
-                else         -> "Press Start"
-            },
-            emptySubText = if (isServerOnly) "Long-press Captured →" else null,
-            borderColor = when {
-                isRunning && !isServerOnly -> Color(0xFF2A4A2A)
-                isRunning && isServerOnly  -> Color(0xFF4A4A1A)
-                else                       -> Color(0xFF2A2A35)
-            },
-            showTapHint = isRunning && !isServerOnly,
-            onTap = if (isRunning && !isServerOnly) onManualCapture else null,
-            onLongPress = null
+            isRunning = isRunning,
+            isServerOnly = isServerOnly,
+            liveBitmap = liveBitmap,
+            manualRotationDegrees = manualRotationDegrees,
+            onManualCapture = onManualCapture,
+            onRotate = onRotate
         )
+    }
+}
+
+// ✅ Live camera panel — panel নিজে rotate হয় না
+// manualRotationDegrees বোঝায় camera কতটা ঘোরানো আছে,
+// সেই দিকটা যেটা camera তে TOP, সেই edge এ yellow indicator দেখানো হয়
+@Composable
+fun LiveCameraPanel(
+    modifier: Modifier = Modifier,
+    isRunning: Boolean,
+    isServerOnly: Boolean,
+    liveBitmap: Bitmap?,
+    manualRotationDegrees: Int,
+    onManualCapture: () -> Unit,
+    onRotate: () -> Unit
+) {
+    val label = when {
+        isRunning && !isServerOnly -> "LIVE"
+        isRunning && isServerOnly  -> "GALLERY"
+        else                       -> "CAMERA"
+    }
+    val labelColor = when {
+        isRunning && !isServerOnly -> Color(0xFF4CAF50)
+        isRunning && isServerOnly  -> Color(0xFFE2C44A)
+        else                       -> Color(0xFF555566)
+    }
+    val borderColor = when {
+        isRunning && !isServerOnly -> Color(0xFF2A4A2A)
+        isRunning && isServerOnly  -> Color(0xFF4A4A1A)
+        else                       -> Color(0xFF2A2A35)
+    }
+
+    // ✅ Yellow TOP indicator — কোন edge টা camera তে "TOP" সেটা নির্ধারণ করে
+    // manualRotationDegrees = 0  → top edge = camera TOP
+    // manualRotationDegrees = 90 → left edge = camera TOP (90°CW করলে left → top)
+    // manualRotationDegrees = 180→ bottom edge = camera TOP
+    // manualRotationDegrees = 270→ right edge = camera TOP
+    val deg = manualRotationDegrees % 360
+    val indicatorAtTop    = deg == 0
+    val indicatorAtLeft   = deg == 90
+    val indicatorAtBottom = deg == 180
+    val indicatorAtRight  = deg == 270
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFF111118),
+        border = BorderStroke(1.dp, borderColor)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (isRunning && !isServerOnly) {
+                        Modifier.pointerInput(Unit) {
+                            detectTapGestures(
+                                onTap = { onManualCapture() }
+                            )
+                        }
+                    } else Modifier
+                )
+        ) {
+            // ── Camera live image — FitCenter: aspect ratio রেখে panel এ fit করবে ──
+            if (liveBitmap != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = liveBitmap.asImageBitmap(),
+                    contentDescription = label,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(16.dp)),
+                    contentScale = ContentScale.Fit
+                )
+            } else {
+                Column(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        if (isServerOnly) Icons.Default.PhotoLibrary else Icons.Default.Videocam,
+                        contentDescription = null,
+                        tint = Color(0xFF2A2A40),
+                        modifier = Modifier.size(40.dp)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = when {
+                            isServerOnly -> "Gallery mode"
+                            isRunning    -> "Tap to capture"
+                            else         -> "Press Start"
+                        },
+                        fontSize = 11.sp,
+                        color = Color(0xFF333344),
+                        letterSpacing = 0.5.sp,
+                        textAlign = TextAlign.Center
+                    )
+                    if (isServerOnly) {
+                        Text(
+                            text = "Long-press Captured →",
+                            fontSize = 9.sp,
+                            color = Color(0xFF2A2A38),
+                            letterSpacing = 0.3.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+                }
+            }
+
+            // ✅ Yellow TOP edge indicator — camera top কোন দিকে সেটা বোঝাতে
+            // 5dp পুরু হলুদ দাগ যেই edge টা camera তে TOP সেখানে থাকবে
+            if (indicatorAtTop) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .background(Color(0xFFFFD700))
+                )
+            }
+            if (indicatorAtBottom) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .background(Color(0xFFFFD700))
+                )
+            }
+            if (indicatorAtLeft) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .fillMaxHeight()
+                        .width(2.dp)
+                        .background(Color(0xFFFFD700))
+                )
+            }
+            if (indicatorAtRight) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .width(2.dp)
+                        .background(Color(0xFFFFD700))
+                )
+            }
+
+            // Label badge (bottom left)
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp),
+                shape = RoundedCornerShape(6.dp),
+                color = Color(0xCC0A0A0F)
+            ) {
+                Text(
+                    text = label,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = labelColor,
+                    letterSpacing = 1.sp
+                )
+            }
+
+            // ✅ Rotate button (bottom right) — শুধু icon, degree text নেই
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .clickable { onRotate() },
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xDD111122),
+                border = BorderStroke(1.dp, Color(0xFF3A3A55))
+            ) {
+                Box(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                    Icon(
+                        Icons.Default.RotateRight,
+                        contentDescription = "Rotate",
+                        tint = Color(0xFF9090CC),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            // Tap hint (top right) — শুধু running অবস্থায়
+            if (isRunning && !isServerOnly) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color(0xCC0A0A0F)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.TouchApp,
+                            contentDescription = null,
+                            tint = Color(0xFF4CAF50),
+                            modifier = Modifier.size(10.dp)
+                        )
+                        Text(
+                            text = "TAP",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF4CAF50),
+                            letterSpacing = 0.8.sp
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -357,11 +637,12 @@ fun PreviewPanel(
     label: String,
     labelColor: Color,
     bitmap: Bitmap?,
+    bitmapRotationDegrees: Float = 0f,
     emptyIcon: androidx.compose.ui.graphics.vector.ImageVector,
     emptyText: String,
     emptySubText: String? = null,
     borderColor: Color,
-    imageContentScale: ContentScale = ContentScale.Crop,
+    imageContentScale: ContentScale = ContentScale.Fit,
     showTapHint: Boolean = false,
     onTap: (() -> Unit)? = null,
     onLongPress: (() -> Unit)? = null
@@ -392,7 +673,10 @@ fun PreviewPanel(
                     contentDescription = label,
                     modifier = Modifier
                         .fillMaxSize()
-                        .clip(RoundedCornerShape(16.dp)),
+                        .clip(RoundedCornerShape(16.dp))
+                        .graphicsLayer {
+                            rotationZ = bitmapRotationDegrees
+                        },
                     contentScale = imageContentScale
                 )
             } else {
@@ -476,7 +760,7 @@ fun PreviewPanel(
                 }
             }
 
-            // Tap-to-capture indicator on LIVE panel
+            // Tap-to-capture indicator
             if (showTapHint) {
                 Surface(
                     modifier = Modifier
@@ -542,7 +826,6 @@ fun StatsAndServerRow(
 
         if (isRunning && serverUrl.isNotEmpty()) {
 
-            // Server root URL chip — tap = copy, long press = open browser
             item {
                 Surface(
                     shape = RoundedCornerShape(10.dp),
@@ -565,7 +848,6 @@ fun StatsAndServerRow(
                 }
             }
 
-            // people.json chip — tap = copy, long press = open browser
             item {
                 val peopleUrl = "$serverUrl/people.json"
                 Surface(
@@ -588,7 +870,6 @@ fun StatsAndServerRow(
                 }
             }
 
-            // all.json chip — tap = copy, long press = open browser
             item {
                 val allUrl = "$serverUrl/all.json"
                 Surface(
@@ -789,7 +1070,7 @@ fun BottomRow(
                     fontSize = 11.sp,
                     color = when {
                         latest.contains("error", ignoreCase = true) ||
-                        latest.contains("failed", ignoreCase = true) -> Color(0xFFE24A4A)
+                                latest.contains("failed", ignoreCase = true) -> Color(0xFFE24A4A)
                         latest.contains("Saved") || latest.contains("Found") -> Color(0xFF4CAF50)
                         else -> Color(0xFF4A90E2)
                     },
