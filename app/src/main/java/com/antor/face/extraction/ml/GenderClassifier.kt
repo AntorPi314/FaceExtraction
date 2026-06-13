@@ -41,6 +41,13 @@ class GenderClassifier(private val context: Context) {
         MOBILENET   // MobileNetV2 — preprocess_input [-1,1], output [1,1] sigmoid
     }
 
+    // ✅ FIX ⑪: ByteBuffer class-level এ pre-allocate করা হয়েছে।
+    // আগে: প্রতি classify() call এ ByteBuffer.allocateDirect(196,608 bytes) হতো।
+    // এখন: load() এ একবার allocate, classify() তে rewind() করে reuse।
+    // model reload হলে (load() আবার call হলে) নতুন size হলে re-allocate হবে।
+    private var inputBuffer: ByteBuffer? = null
+    private var pixelBuffer: IntArray? = null
+
     companion object {
         private const val TAG = "GenderClassifier"
 
@@ -81,6 +88,13 @@ class GenderClassifier(private val context: Context) {
             val outputShape = interpreter!!.getOutputTensor(0).shape()
             modelType = if (outputShape.last() == 1) ModelType.MOBILENET else ModelType.DEFAULT
 
+            // ✅ FIX ⑪: model load হলে input buffer একবার allocate করা হচ্ছে
+            val bufferSize = 1 * inputSize * inputSize * 3 * 4
+            inputBuffer = ByteBuffer.allocateDirect(bufferSize).also {
+                it.order(ByteOrder.nativeOrder())
+            }
+            pixelBuffer = IntArray(inputSize * inputSize)
+
             Log.d(TAG, "Model loaded: $modelFile | Type: $modelType | Input: ${inputSize}×${inputSize} | OutputShape: ${outputShape.toList()}")
             isLoaded = true
             true
@@ -99,15 +113,19 @@ class GenderClassifier(private val context: Context) {
             val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
 
             // 2. Build input buffer based on model type
-            val inputBuffer = when (modelType) {
-                ModelType.DEFAULT  -> buildInputDefault(resized)
-                ModelType.MOBILENET -> buildInputMobileNet(resized)
+            //    ✅ FIX ⑪: pre-allocated buffer reuse করা হচ্ছে
+            val buf = inputBuffer ?: return Gender.UNKNOWN
+            buf.rewind()
+
+            when (modelType) {
+                ModelType.DEFAULT   -> fillInputDefault(resized, buf)
+                ModelType.MOBILENET -> fillInputMobileNet(resized, buf)
             }
 
             // 3. Run inference based on model type
             when (modelType) {
-                ModelType.DEFAULT   -> classifyDefault(inputBuffer)
-                ModelType.MOBILENET -> classifyMobileNet(inputBuffer)
+                ModelType.DEFAULT   -> classifyDefault(buf)
+                ModelType.MOBILENET -> classifyMobileNet(buf)
             }
 
         } catch (e: Exception) {
@@ -118,39 +136,28 @@ class GenderClassifier(private val context: Context) {
 
     // ─── DEFAULT model preprocessing ─────────────────────────────────────────
     // Normalize pixel values to [0.0, 1.0] — simple /255 normalization
-    private fun buildInputDefault(bitmap: Bitmap): ByteBuffer {
-        val buffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4)
-        buffer.order(ByteOrder.nativeOrder())
-        buffer.rewind()
-
-        val pixels = IntArray(inputSize * inputSize)
+    // ✅ FIX ⑪: pre-allocated pixelBuffer reuse করা হচ্ছে
+    private fun fillInputDefault(bitmap: Bitmap, buffer: ByteBuffer) {
+        val pixels = pixelBuffer ?: IntArray(inputSize * inputSize)
         bitmap.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
-
         for (pixel in pixels) {
             buffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f) // R → [0,1]
             buffer.putFloat(((pixel shr 8)  and 0xFF) / 255.0f) // G → [0,1]
             buffer.putFloat(( pixel          and 0xFF) / 255.0f) // B → [0,1]
         }
-        return buffer
     }
 
     // ─── MobileNetV2 model preprocessing ─────────────────────────────────────
     // TensorFlow preprocess_input: pixel / 127.5 - 1.0  → range [-1.0, 1.0]
-    // এটা Keras এর MobileNetV2 এর জন্য required normalization
-    private fun buildInputMobileNet(bitmap: Bitmap): ByteBuffer {
-        val buffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4)
-        buffer.order(ByteOrder.nativeOrder())
-        buffer.rewind()
-
-        val pixels = IntArray(inputSize * inputSize)
+    // ✅ FIX ⑪: pre-allocated pixelBuffer reuse করা হচ্ছে
+    private fun fillInputMobileNet(bitmap: Bitmap, buffer: ByteBuffer) {
+        val pixels = pixelBuffer ?: IntArray(inputSize * inputSize)
         bitmap.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
-
         for (pixel in pixels) {
             buffer.putFloat(((pixel shr 16) and 0xFF) / 127.5f - 1.0f) // R → [-1,1]
             buffer.putFloat(((pixel shr 8)  and 0xFF) / 127.5f - 1.0f) // G → [-1,1]
             buffer.putFloat(( pixel          and 0xFF) / 127.5f - 1.0f) // B → [-1,1]
         }
-        return buffer
     }
 
     // ─── DEFAULT model inference ──────────────────────────────────────────────
@@ -188,6 +195,8 @@ class GenderClassifier(private val context: Context) {
     fun close() {
         interpreter?.close()
         interpreter = null
-        isLoaded    = false
+        inputBuffer  = null
+        pixelBuffer  = null
+        isLoaded     = false
     }
 }

@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
+import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.net.Uri
@@ -27,6 +28,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.lifecycleScope
 import com.antor.face.extraction.service.FaceCaptureService
 import com.antor.face.extraction.ui.MainScreen
 import com.antor.face.extraction.ui.theme.FaceExtractionTheme
@@ -34,9 +36,7 @@ import com.antor.face.extraction.utils.AppSettings
 import com.antor.face.extraction.utils.FileManager
 import com.antor.face.extraction.utils.ImageUtils
 import com.antor.face.extraction.utils.NetworkUtils
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -82,7 +82,8 @@ class MainActivity : ComponentActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraActive = false
 
-    private val activityScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    // ✅ FIX ①: activityScope সরানো হয়েছে — lifecycleScope ব্যবহার করা হচ্ছে।
+    // lifecycleScope Activity destroy হলে automatically cancel হয়, leak নেই।
 
     // Frame rate throttle — live preview ফাস্ট রাখার জন্য কম FPS এ analyze করা হচ্ছে
     private var lastFrameTime = 0L
@@ -94,6 +95,22 @@ class MainActivity : ComponentActivity() {
 
     // YUV conversion buffer — reuse করা হচ্ছে
     private val yuvBaos = ByteArrayOutputStream(64 * 1024)
+
+    // ✅ FIX ②: nv21 ByteArray class-level এ pre-allocate করা হয়েছে।
+    // 480×640 portrait target এ 460,800 bytes। প্রতি frame এ নতুন allocation বাঁচবে।
+    // camera size change হলে lazy re-allocate করা হয়।
+    private var nv21Buffer = ByteArray(0)
+    private var nv21Width = 0
+    private var nv21Height = 0
+
+    // ✅ FIX ③: Matrix class-level এ একটাই রাখা হয়েছে।
+    // প্রতি frame এ নতুন Matrix() allocate করা বন্ধ।
+    private val reusableMatrix = Matrix()
+
+    // ✅ FIX ④: BitmapFactory.Options একটাই রাখা হয়েছে।
+    // inBitmap দিয়ে পুরনো bitmap reuse করা হয় — heap allocation কমে।
+    private val bitmapOptions = BitmapFactory.Options()
+    private var inBitmapCache: Bitmap? = null
 
     // ── Broadcast receivers ───────────────────────────────────────────────────
 
@@ -309,12 +326,17 @@ class MainActivity : ComponentActivity() {
         cameraActive = false
         _liveBitmap.value = null
         FaceCaptureService.latestLiveFrame.set(null)
+        // ✅ inBitmap cache clear করা — camera থামলে পুরনো bitmap hold করা দরকার নেই
+        inBitmapCache?.recycle()
+        inBitmapCache = null
     }
 
-    // ── YUV → Bitmap conversion (preview — downscaled)
-    // ✅ Auto rotation সম্পূর্ণ বাদ — manual rotation শুধু captured image এ apply হবে
-    // Preview এ rotation apply করা হয় না (live frame যেভাবে আসে সেভাবেই দেখাবে,
-    // yellow TOP indicator দিয়ে orientation বোঝানো হয়)
+    // ── YUV → Bitmap conversion (preview — downscaled) ──────────────────────
+    // ✅ FIX ②③④⑤ সব এখানে apply হয়েছে:
+    //   ② nv21Buffer reuse (size অনুযায়ী lazy re-alloc)
+    //   ③ reusableMatrix reset করে reuse
+    //   ④ bitmapOptions + inBitmap reuse
+    //   ⑤ front camera তে horizontal flip যোগ করা হয়েছে
 
     private fun yuv420ToBitmap(imageProxy: ImageProxy): Bitmap? {
         return try {
@@ -329,7 +351,13 @@ class MainActivity : ComponentActivity() {
             val uvRowStride   = uPlane.rowStride
             val uvPixelStride = uPlane.pixelStride
 
-            val nv21 = ByteArray(width * height * 3 / 2)
+            // ✅ FIX ②: ByteArray reuse — size바뀌면 re-allocate, 그 외엔 기존 사용
+            if (nv21Width != width || nv21Height != height) {
+                nv21Buffer = ByteArray(width * height * 3 / 2)
+                nv21Width  = width
+                nv21Height = height
+            }
+            val nv21 = nv21Buffer
 
             val yBuffer = yPlane.buffer
             for (row in 0 until height) {
@@ -358,24 +386,49 @@ class MainActivity : ComponentActivity() {
             val bytes = yuvBaos.toByteArray()
 
             val sampleSize = calculateInSampleSize(width, height, previewMaxDimension)
-            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-            val rawBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-                ?: return null
 
-            // ✅ Sensor rotation fix — CameraX ImageAnalysis থেকে আসা frame
-            // সাধারণত 90° rotated থাকে (sensor orientation)।
-            // Portrait mode এ সঠিকভাবে দেখাতে 90° rotate করতে হবে।
-            // Front camera তে additional horizontal flip দরকার।
+            // ✅ FIX ④: BitmapFactory.Options reuse + inBitmap
+            // inBitmap থাকলে নতুন heap allocation বাদ দিয়ে পুরনো bitmap-এ overwrite করে
+            bitmapOptions.inSampleSize = sampleSize
+            bitmapOptions.inMutable    = true
+            val candidateInBitmap = inBitmapCache
+            if (candidateInBitmap != null && !candidateInBitmap.isRecycled) {
+                bitmapOptions.inBitmap = candidateInBitmap
+            } else {
+                bitmapOptions.inBitmap = null
+            }
+
+            val rawBitmap = try {
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bitmapOptions)
+            } catch (e: IllegalArgumentException) {
+                // inBitmap size mismatch — fallback দিয়ে নতুন allocate করো
+                bitmapOptions.inBitmap = null
+                inBitmapCache = null
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bitmapOptions)
+            } ?: return null
+
+            // inBitmap cache আপডেট করো (এই bitmap-ই পরের frame এ reuse হবে)
+            if (rawBitmap !== inBitmapCache) {
+                inBitmapCache = rawBitmap
+            }
+
+            // ✅ FIX ③: reusableMatrix reset করে reuse
+            // ✅ FIX ⑤: front camera তে horizontal flip যোগ করা হয়েছে
             val sensorRotation = imageProxy.imageInfo.rotationDegrees
-            if (sensorRotation == 0) {
+            val useFront = AppSettings.getUseFrontCamera(this)
+            val needsRotation = sensorRotation != 0
+            val needsFlip     = useFront
+
+            return if (!needsRotation && !needsFlip) {
                 rawBitmap
             } else {
-                val matrix = android.graphics.Matrix()
-                matrix.postRotate(sensorRotation.toFloat())
-                val rotated = android.graphics.Bitmap.createBitmap(
-                    rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true
+                reusableMatrix.reset()
+                if (needsRotation) reusableMatrix.postRotate(sensorRotation.toFloat())
+                if (needsFlip)     reusableMatrix.postScale(-1f, 1f, rawBitmap.width / 2f, rawBitmap.height / 2f)
+                val rotated = Bitmap.createBitmap(
+                    rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, reusableMatrix, true
                 )
-                if (rotated !== rawBitmap) rawBitmap.recycle()
+                // rawBitmap এখন inBitmapCache — recycle করবো না, পরের frame এ reuse হবে
                 rotated
             }
 
@@ -412,7 +465,8 @@ class MainActivity : ComponentActivity() {
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(imageProxy: ImageProxy) {
                     Log.d(TAG, "onCaptureSuccess")
-                    activityScope.launch(Dispatchers.IO) {
+                    // ✅ FIX ①: activityScope.launch → lifecycleScope.launch
+                    lifecycleScope.launch(Dispatchers.IO) {
                         try {
                             val bitmap = jpegImageProxyToBitmap(imageProxy)
                             imageProxy.close()
@@ -482,13 +536,12 @@ class MainActivity : ComponentActivity() {
             _allCount.intValue = 0
             _logMessages.add(0, "Gallery image picked, processing...")
 
-            val baos = ByteArrayOutputStream()
-            originalBitmap.compress(Bitmap.CompressFormat.JPEG, 92, baos)
-            val jpegBytes = baos.toByteArray()
-
+            // ✅ FIX ⑬: JPEG roundtrip সরানো হয়েছে।
+            // আগে: Bitmap → compress JPEG → Intent extra → Service decode।
+            // এখন: pendingBitmapToProcess AtomicReference দিয়ে সরাসরি pass করা হচ্ছে।
+            FaceCaptureService.pendingBitmapToProcess.set(originalBitmap)
             val intent = Intent(this, FaceCaptureService::class.java).apply {
-                action = FaceCaptureService.ACTION_PROCESS_GALLERY
-                putExtra(FaceCaptureService.EXTRA_GALLERY_JPEG, jpegBytes)
+                action = FaceCaptureService.ACTION_PROCESS_BITMAP
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
             else startService(intent)
@@ -585,6 +638,8 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         stopCamera()
         cameraExecutor.shutdown()
+        // ✅ FIX ①: lifecycleScope ব্যবহার করায় এখানে আলাদা cancel() দরকার নেই।
+        // Activity destroy হলে lifecycleScope নিজেই cancel হয়।
         super.onDestroy()
     }
 }

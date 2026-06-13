@@ -32,7 +32,9 @@ class FaceCaptureService : LifecycleService() {
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
         const val ACTION_START_SERVER_ONLY = "ACTION_START_SERVER_ONLY"
-        const val ACTION_PROCESS_GALLERY = "ACTION_PROCESS_GALLERY"
+        // ✅ FIX ⑬: ACTION_PROCESS_GALLERY সরানো হয়েছে।
+        // Gallery image এখন pendingBitmapToProcess AtomicReference দিয়ে pass হয়,
+        // তারপর ACTION_PROCESS_BITMAP দিয়ে trigger করা হয়।
         const val ACTION_MANUAL_CAPTURE = "ACTION_MANUAL_CAPTURE"
         const val ACTION_PROCESS_BITMAP = "ACTION_PROCESS_BITMAP"
 
@@ -51,7 +53,8 @@ class FaceCaptureService : LifecycleService() {
 
         const val BROADCAST_REQUEST_CAPTURE = "com.antor.face.extraction.REQUEST_CAPTURE"
 
-        const val EXTRA_GALLERY_JPEG = "extra_gallery_jpeg"
+        // ✅ EXTRA_GALLERY_JPEG সরানো হয়েছে — আর Intent extra দিয়ে JPEG pass হয় না
+        // const val EXTRA_GALLERY_JPEG = "extra_gallery_jpeg"  // REMOVED
 
         var isRunning = false
         var isServerOnly = false
@@ -94,15 +97,8 @@ class FaceCaptureService : LifecycleService() {
                 return START_NOT_STICKY
             }
             ACTION_START_SERVER_ONLY -> startServerOnly()
-            ACTION_PROCESS_GALLERY -> {
-                val jpeg = intent.getByteArrayExtra(EXTRA_GALLERY_JPEG)
-                if (jpeg != null) {
-                    val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
-                    if (bitmap != null) {
-                        serviceScope.launch(Dispatchers.IO) { processImage(bitmap) }
-                    }
-                }
-            }
+            // ✅ FIX ⑬: ACTION_PROCESS_GALLERY case সরানো হয়েছে।
+            // Gallery image এখন ACTION_PROCESS_BITMAP দিয়ে আসে (pendingBitmapToProcess থেকে)।
             ACTION_MANUAL_CAPTURE -> {
                 if (isRunning && !isServerOnly) {
                     sendLocalBroadcast(Intent(BROADCAST_REQUEST_CAPTURE))
@@ -210,6 +206,17 @@ class FaceCaptureService : LifecycleService() {
 
         val faces = faceProcessor.detectAndCrop(bitmap)
 
+        // ✅ FIX ⑥: original bitmap recycle করা হচ্ছে।
+        // face crop হয়ে গেলে original full-frame bitmap আর দরকার নেই।
+        // latestCapturedFace-এ এটা set আছে — তাই recycle করলে UI crash হবে।
+        // তাই recycle করছি না এখানে; বরং পরের processImage() call এ
+        // latestCapturedFace.set() করার আগে পুরনোটা recycle করা হচ্ছে।
+        val previousCapture = latestCapturedFace.getAndSet(bitmap)
+        // পুরনো bitmap যদি বর্তমানের থেকে আলাদা হয় তাহলে recycle করো
+        if (previousCapture !== bitmap && previousCapture != null && !previousCapture.isRecycled) {
+            previousCapture.recycle()
+        }
+
         if (faces.isEmpty()) {
             log("No faces detected")
             val totalMale   = FileManager.getMaleCount(this)
@@ -234,6 +241,8 @@ class FaceCaptureService : LifecycleService() {
                 Gender.FEMALE -> { FileManager.saveFace(this, face.bitmap, Gender.FEMALE); femaleCount++ }
                 Gender.UNKNOWN -> { unknownCount++; Log.d(TAG, "Face skipped — low confidence") }
             }
+            // ✅ crop করা face bitmap recycle করো — saveFace() এর পরে আর দরকার নেই
+            if (!face.bitmap.isRecycled) face.bitmap.recycle()
         }
 
         val totalMale   = FileManager.getMaleCount(this)

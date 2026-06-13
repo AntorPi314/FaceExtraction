@@ -3,13 +3,9 @@ package com.antor.face.extraction.utils
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraManager
 import android.net.Uri
-import android.os.Build
 import android.view.OrientationEventListener
 import android.view.Surface
-import android.view.WindowManager
 import androidx.exifinterface.media.ExifInterface
 import java.io.InputStream
 
@@ -54,10 +50,11 @@ object ImageUtils {
         }
     }
 
-    // ✅ REMOVED: getCorrectRotation() — nowhere called, CameraX handles rotation via
-    //             imageInfo.rotationDegrees + targetRotation (set in FaceCaptureService)
-    // ✅ REMOVED: physicalOrientationToRotationDegrees() — nowhere called,
-    //             physicalOrientationToSurfaceRotation() covers the only actual use case
+    // ✅ REMOVED getCorrectRotation() — nowhere called
+    // ✅ REMOVED physicalOrientationToRotationDegrees() — nowhere called
+    // ✅ FIX ⑫: calculateRotationDegrees() সরানো হয়েছে।
+    //    CameraManager query + complex sensor orientation formula ছিল কিন্তু
+    //    পুরো codebase-এ কোথাও call হতো না। Dead code।
 
     /**
      * Sensor-based rotation দিয়ে ImageCapture এর targetRotation বের করে।
@@ -71,61 +68,6 @@ object ImageUtils {
             physicalOrientation in 136..225                         -> Surface.ROTATION_180
             physicalOrientation in 226..315                         -> Surface.ROTATION_270
             else                                                    -> Surface.ROTATION_0
-        }
-    }
-
-    /**
-     * Camera sensor orientation + physical device orientation মিলিয়ে
-     * bitmap কে কতটুকু rotate করতে হবে সেই degree বের করে।
-     *
-     * EXIF বা CameraX এর imageInfo.rotationDegrees ব্যবহার করা হয় না —
-     * সেগুলো phone বাঁকা থাকলে (flat/tilted) ভুল দেয়।
-     * OrientationEventListener সরাসরি physical sensor পড়ে, তাই সবসময় accurate।
-     *
-     * @param context          camera sensor orientation পড়ার জন্য
-     * @param physicalOrientation OrientationEventListener.onOrientationChanged() এর value
-     * @param useFrontCamera   front camera হলে mirror compensation লাগে
-     */
-    fun calculateRotationDegrees(
-        context: Context,
-        physicalOrientation: Int,
-        useFrontCamera: Boolean
-    ): Int {
-        // Physical orientation থেকে device এর actual rotation degree বের করা
-        val deviceDegrees = when {
-            physicalOrientation == OrientationEventListener.ORIENTATION_UNKNOWN -> 0
-            physicalOrientation <= 45 || physicalOrientation > 315  -> 0   // Portrait
-            physicalOrientation in 46..135                          -> 90  // Landscape (right side down)
-            physicalOrientation in 136..225                         -> 180 // Upside-down portrait
-            physicalOrientation in 226..315                         -> 270 // Landscape (left side down)
-            else                                                    -> 0
-        }
-
-        // Camera sensor orientation পড়া (hardware এ fixed, সাধারণত 90 বা 270)
-        val sensorDegrees = try {
-            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
-                val facing = cameraManager.getCameraCharacteristics(id)
-                    .get(CameraCharacteristics.LENS_FACING)
-                if (useFrontCamera)
-                    facing == CameraCharacteristics.LENS_FACING_FRONT
-                else
-                    facing == CameraCharacteristics.LENS_FACING_BACK
-            } ?: cameraManager.cameraIdList.firstOrNull()
-            cameraId?.let {
-                cameraManager.getCameraCharacteristics(it)
-                    .get(CameraCharacteristics.SENSOR_ORIENTATION)
-            } ?: 90
-        } catch (e: Exception) {
-            90 // most Android phones এ back camera sensor 90° rotated
-        }
-
-        // Final rotation calculation:
-        // Front camera তে sensor mirror হয়, তাই আলাদা formula
-        return if (useFrontCamera) {
-            (sensorDegrees + deviceDegrees + 360) % 360
-        } else {
-            (sensorDegrees - deviceDegrees + 360) % 360
         }
     }
 
